@@ -1,0 +1,70 @@
+# .github/workflows/gl21-linux-x64.yml
+name: Build Shipwright (GL 2.1 patch, Linux x86_64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "gl21-patch" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Shipwright
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake python3 python3-pip \
+            libsdl2-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libpulse-dev libx11-dev libxrandr-dev libxi-dev
+
+      - name: Patch libultraship GL backend to GL 2.1
+        run: |
+          cd libultraship/src/fast/backends
+          FILE=gfx_opengl.cpp
+          # baixa o piso de GLSL 130 -> 120 no fragment shader desktop
+          sed -i 's/#version 130/#version 120/' "$FILE"
+          # troca textureSize() por uniforms de tamanho já existentes (ajuste os nomes se o build reclamar)
+          grep -n "textureSize" "$FILE" || echo "aviso: nenhuma ocorrência de textureSize encontrada, confira manualmente"
+
+      - name: Patch shader GLSL
+        run: |
+          SHADER=libultraship/src/fast/shaders/opengl/default.shader.glsl
+          sed -i 's/#version 130/#version 120/' "$SHADER" || true
+          grep -n "textureSize" "$SHADER" || echo "aviso: nenhuma ocorrência de textureSize encontrada, confira manualmente"
+
+      - name: Guard glBlitFramebuffer / glRenderbufferStorageMultisample / GL_DEPTH_STENCIL readback
+        run: |
+          FILE=libultraship/src/fast/backends/gfx_opengl.cpp
+          grep -n "glBlitFramebuffer\|glRenderbufferStorageMultisample\|GL_DEPTH_STENCIL" "$FILE" || true
+          echo "revise manualmente os pontos acima se o build falhar por símbolo ausente em GL2.1"
+
+      - name: Configure (Ninja)
+        run: |
+          cmake -H. -Bbuild-cmake -GNinja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Generate soh.otr
+        run: |
+          cmake --build build-cmake --target GenerateSohOtr
+
+      - name: Build
+        run: |
+          cmake --build build-cmake --config Release -j$(nproc)
+
+      - name: Package AppImage
+        run: |
+          cd build-cmake
+          cpack -G External || echo "cpack External (AppImage) falhou, veja logs"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: shipwright-gl21-linux-x64
+          path: |
+            build-cmake/soh/soh.elf
+            build-cmake/*.AppImage
+            build-cmake/**/*.AppImage
