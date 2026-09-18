@@ -14,13 +14,22 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install deps
+      - name: Install deps from repo's own apt-deps.txt (+ extras faltantes)
         run: |
           sudo apt-get update
+          if [ -f libultraship/.github/workflows/apt-deps.txt ]; then
+            sudo apt-get install -y $(cat libultraship/.github/workflows/apt-deps.txt)
+          fi
           sudo apt-get install -y ninja-build cmake python3 python3-pip \
             libsdl2-dev libgl1-mesa-dev libglu1-mesa-dev \
             libpulse-dev libx11-dev libxrandr-dev libxi-dev \
-            libzip-dev
+            libzip-dev libzip-tools
+
+      - name: Install python requirements (se existir)
+        run: |
+          if [ -f libultraship/requirements.txt ]; then
+            pip3 install -r libultraship/requirements.txt
+          fi
 
       - name: Patch libultraship GL backend to GL 2.1
         run: |
