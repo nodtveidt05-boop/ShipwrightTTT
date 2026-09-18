@@ -17,58 +17,42 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y $(cat .github/workflows/apt-deps.txt) libzip-dev zipcmp zipmerge ziptool
+          sudo apt-get install -y $(cat linux-build-deps/apt.txt)
 
-      - name: Install latest SDL
+      - name: Apply GL 2.1 patch
         run: |
-          wget https://github.com/libsdl-org/SDL/releases/download/release-2.30.3/SDL2-2.30.3.tar.gz
-          tar -xzf SDL2-2.30.3.tar.gz
-          cd SDL2-2.30.3
-          ./configure --enable-hidapi-libusb
-          make -j$(nproc)
-          sudo make install
-          sudo ldconfig
+          python3 - <<'EOF'
+          import re, sys, pathlib
 
-      - name: Install latest tinyxml2
+          def patch(path, subs):
+              p = pathlib.Path(path)
+              s = p.read_bytes().decode("utf-8")
+              for pat, rep, expected in subs:
+                  s, n = re.subn(pat, rep, s)
+                  if n != expected:
+                      sys.exit(f"PATCH FALHOU em {path}: {pat!r} -> {n} ocorrencias (esperado {expected})")
+                  print(f"ok {p.name}: {pat!r} x{n}")
+              p.write_bytes(s.encode("utf-8"))
+
+          patch("libultraship/src/fast/backends/gfx_opengl.cpp", [
+              (r'\{ "GLSL_VERSION", "#version 130" \}', '{ "GLSL_VERSION", "#version 120" }', 1),
+          ])
+          patch("libultraship/src/fast/shaders/opengl/default.shader.glsl", [
+              (r'textureSize\(uTexMask@\{i\}, 0\)', 'texSize@{i}', 2),
+              (r'mix\(higher, lower, cutoff\)', 'mix(higher, lower, vec3(cutoff))', 1),
+          ])
+          EOF
+
+      - name: Generate soh.o2r
         run: |
-          sudo apt-get remove -y libtinyxml2-dev || true
-          wget https://github.com/leethomason/tinyxml2/archive/refs/tags/10.0.0.tar.gz
-          tar -xzf 10.0.0.tar.gz
-          cd tinyxml2-10.0.0
-          mkdir -p build && cd build
-          cmake ..
-          sudo make install -j$(nproc)
-          sudo ldconfig
+          cmake --no-warn-unused-cli -H. -Bbuild-cmake -GNinja -DCMAKE_BUILD_TYPE:STRING=Release -DSOH_TOOLS_ONLY=ON
+          cmake --build build-cmake --config Release --target GenerateSohOtr -j4
 
-      - name: Patch libultraship GL backend to GL 2.1
-        run: |
-          cd libultraship/src/fast/backends
-          FILE=gfx_opengl.cpp
-          sed -i 's/#version 130/#version 120/' "$FILE"
-          grep -n "textureSize" "$FILE" || echo "aviso: nenhuma ocorrência de textureSize encontrada, confira manualmente"
-
-      - name: Patch shader GLSL
-        run: |
-          SHADER=libultraship/src/fast/shaders/opengl/default.shader.glsl
-          sed -i 's/#version 130/#version 120/' "$SHADER" || true
-          grep -n "textureSize" "$SHADER" || echo "aviso: nenhuma ocorrência de textureSize encontrada, confira manualmente"
-
-      - name: Guard glBlitFramebuffer / glRenderbufferStorageMultisample / GL_DEPTH_STENCIL readback
-        run: |
-          FILE=libultraship/src/fast/backends/gfx_opengl.cpp
-          grep -n "glBlitFramebuffer\|glRenderbufferStorageMultisample\|GL_DEPTH_STENCIL" "$FILE" || true
-          echo "revise manualmente os pontos acima se o build falhar por símbolo ausente em GL2.1"
-
-      - name: Configure and generate soh.otr
-        run: |
-          cmake --no-warn-unused-cli -H. -Bbuild-cmake -GNinja -DCMAKE_BUILD_TYPE:STRING=Release
-          cmake --build build-cmake --config Release --target GenerateSohOtr -j$(nproc)
-
-      - name: Upload soh.otr
+      - name: Upload soh.o2r
         uses: actions/upload-artifact@v4
         with:
-          name: soh.otr
-          path: soh.otr
+          name: soh.o2r
+          path: soh.o2r
           retention-days: 3
 
   build-linux:
@@ -83,82 +67,83 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y $(cat .github/workflows/apt-deps.txt) libzip-dev zipcmp zipmerge ziptool
+          sudo apt-get install -y $(cat linux-build-deps/apt.txt)
+
+      - name: Create deps folder
+        run: mkdir -p deps
 
       - name: Install latest SDL
         run: |
           wget https://github.com/libsdl-org/SDL/releases/download/release-2.30.3/SDL2-2.30.3.tar.gz
-          tar -xzf SDL2-2.30.3.tar.gz
-          cd SDL2-2.30.3
+          tar -xzf SDL2-2.30.3.tar.gz -C deps
+          cd deps/SDL2-2.30.3
           ./configure --enable-hidapi-libusb
           make -j$(nproc)
           sudo make install
-          sudo ldconfig
+          sudo cp -av /usr/local/lib/libSDL* /lib/x86_64-linux-gnu/
 
-      - name: Install latest SDL_net
-        run: |
-          wget https://www.libsdl.org/projects/SDL_net/release/SDL2_net-2.2.0.tar.gz
-          tar -xzf SDL2_net-2.2.0.tar.gz
-          cd SDL2_net-2.2.0
-          ./configure
-          make -j$(nproc)
-          sudo make install
-          sudo ldconfig
+      - uses: ./.github/actions/install-sdl2-net
 
-      - name: Install latest tinyxml2
-        run: |
-          sudo apt-get remove -y libtinyxml2-dev || true
-          wget https://github.com/leethomason/tinyxml2/archive/refs/tags/10.0.0.tar.gz
-          tar -xzf 10.0.0.tar.gz
-          cd tinyxml2-10.0.0
-          mkdir -p build && cd build
-          cmake ..
-          sudo make install -j$(nproc)
-          sudo ldconfig
+      - name: Copy SDL libs to multiarch dir
+        run: sudo cp -av /usr/local/lib/libSDL* /lib/x86_64-linux-gnu/
+
+      - name: Remove distro tinyxml2
+        run: sudo apt-get remove -y libtinyxml2-dev
+
+      - uses: ./.github/actions/install-tinyxml2
 
       - name: Install libzip without crypto
         run: |
+          sudo apt-get remove -y libzip-dev
           wget https://github.com/nih-at/libzip/releases/download/v1.10.1/libzip-1.10.1.tar.gz
-          tar -xzf libzip-1.10.1.tar.gz
-          cd libzip-1.10.1
-          mkdir -p build && cd build
+          tar -xzf libzip-1.10.1.tar.gz -C deps
+          cd deps/libzip-1.10.1
+          mkdir -p build
+          cd build
           cmake .. -DENABLE_COMMONCRYPTO=OFF -DENABLE_GNUTLS=OFF -DENABLE_MBEDTLS=OFF -DENABLE_OPENSSL=OFF
-          sudo make install -j$(nproc)
-          sudo ldconfig
+          make -j$(nproc)
+          sudo make install
+          sudo cp -av /usr/local/lib/libzip* /lib/x86_64-linux-gnu/
 
-      - name: Patch libultraship GL backend to GL 2.1
+      - name: Apply GL 2.1 patch
         run: |
-          cd libultraship/src/fast/backends
-          FILE=gfx_opengl.cpp
-          sed -i 's/#version 130/#version 120/' "$FILE"
-          grep -n "textureSize" "$FILE" || echo "aviso: nenhuma ocorrência de textureSize encontrada, confira manualmente"
+          python3 - <<'EOF'
+          import re, sys, pathlib
 
-      - name: Patch shader GLSL
-        run: |
-          SHADER=libultraship/src/fast/shaders/opengl/default.shader.glsl
-          sed -i 's/#version 130/#version 120/' "$SHADER" || true
-          grep -n "textureSize" "$SHADER" || echo "aviso: nenhuma ocorrência de textureSize encontrada, confira manualmente"
+          def patch(path, subs):
+              p = pathlib.Path(path)
+              s = p.read_bytes().decode("utf-8")
+              for pat, rep, expected in subs:
+                  s, n = re.subn(pat, rep, s)
+                  if n != expected:
+                      sys.exit(f"PATCH FALHOU em {path}: {pat!r} -> {n} ocorrencias (esperado {expected})")
+                  print(f"ok {p.name}: {pat!r} x{n}")
+              p.write_bytes(s.encode("utf-8"))
 
-      - name: Guard glBlitFramebuffer / glRenderbufferStorageMultisample / GL_DEPTH_STENCIL readback
-        run: |
-          FILE=libultraship/src/fast/backends/gfx_opengl.cpp
-          grep -n "glBlitFramebuffer\|glRenderbufferStorageMultisample\|GL_DEPTH_STENCIL" "$FILE" || true
-          echo "revise manualmente os pontos acima se o build falhar por símbolo ausente em GL2.1"
+          patch("libultraship/src/fast/backends/gfx_opengl.cpp", [
+              (r'\{ "GLSL_VERSION", "#version 130" \}', '{ "GLSL_VERSION", "#version 120" }', 1),
+          ])
+          patch("libultraship/src/fast/shaders/opengl/default.shader.glsl", [
+              (r'textureSize\(uTexMask@\{i\}, 0\)', 'texSize@{i}', 2),
+              (r'mix\(higher, lower, cutoff\)', 'mix(higher, lower, vec3(cutoff))', 1),
+          ])
+          EOF
 
-      - name: Download soh.otr
+      - name: Download soh.o2r
         uses: actions/download-artifact@v4
         with:
-          name: soh.otr
+          name: soh.o2r
           path: build-cmake/soh
 
       - name: Build SoH
         run: |
-          cmake --no-warn-unused-cli -H. -Bbuild-cmake -GNinja -DCMAKE_BUILD_TYPE:STRING=Release
-          cmake --build build-cmake --config Release -j$(nproc)
-          cd build-cmake
-          cpack -G External
-          cd ..
-          mv _packages/*.AppImage soh.appimage || true
+          cmake --no-warn-unused-cli -H. -Bbuild-cmake -GNinja -DCMAKE_BUILD_TYPE:STRING=Release -DBUILD_REMOTE_CONTROL=1
+          cmake --build build-cmake --config Release -j4
+          (cd build-cmake && cpack -G External)
+          mv build-cmake/*.appimage soh.appimage
+        env:
+          CC: gcc-12
+          CXX: g++-12
 
       - name: Upload build
         uses: actions/upload-artifact@v4
