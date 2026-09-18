@@ -6,30 +6,39 @@ on:
     branches: [ "gl21-patch" ]
 
 jobs:
-  build:
+  generate-soh-otr:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout Shipwright
+      - name: Git Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: true
 
-      - name: Install deps from repo's own apt-deps.txt (+ extras faltantes)
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          if [ -f libultraship/.github/workflows/apt-deps.txt ]; then
-            sudo apt-get install -y $(cat libultraship/.github/workflows/apt-deps.txt)
-          fi
-          sudo apt-get install -y ninja-build cmake python3 python3-pip \
-            libsdl2-dev libgl1-mesa-dev libglu1-mesa-dev \
-            libpulse-dev libx11-dev libxrandr-dev libxi-dev \
-            libzip-dev zipcmp zipmerge ziptool
+          sudo apt-get install -y $(cat .github/workflows/apt-deps.txt) libzip-dev zipcmp zipmerge ziptool
 
-      - name: Install python requirements (se existir)
+      - name: Install latest SDL
         run: |
-          if [ -f libultraship/requirements.txt ]; then
-            pip3 install -r libultraship/requirements.txt
-          fi
+          wget https://github.com/libsdl-org/SDL/releases/download/release-2.30.3/SDL2-2.30.3.tar.gz
+          tar -xzf SDL2-2.30.3.tar.gz
+          cd SDL2-2.30.3
+          ./configure --enable-hidapi-libusb
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
+
+      - name: Install latest tinyxml2
+        run: |
+          sudo apt-get remove -y libtinyxml2-dev || true
+          wget https://github.com/leethomason/tinyxml2/archive/refs/tags/10.0.0.tar.gz
+          tar -xzf 10.0.0.tar.gz
+          cd tinyxml2-10.0.0
+          mkdir -p build && cd build
+          cmake ..
+          sudo make install -j$(nproc)
+          sudo ldconfig
 
       - name: Patch libultraship GL backend to GL 2.1
         run: |
@@ -50,28 +59,111 @@ jobs:
           grep -n "glBlitFramebuffer\|glRenderbufferStorageMultisample\|GL_DEPTH_STENCIL" "$FILE" || true
           echo "revise manualmente os pontos acima se o build falhar por símbolo ausente em GL2.1"
 
-      - name: Configure (Ninja)
+      - name: Configure and generate soh.otr
         run: |
-          cmake -H. -Bbuild-cmake -GNinja -DCMAKE_BUILD_TYPE=Release
+          cmake --no-warn-unused-cli -H. -Bbuild-cmake -GNinja -DCMAKE_BUILD_TYPE:STRING=Release
+          cmake --build build-cmake --config Release --target GenerateSohOtr -j$(nproc)
 
-      - name: Generate soh.otr
-        run: |
-          cmake --build build-cmake --target GenerateSohOtr
+      - name: Upload soh.otr
+        uses: actions/upload-artifact@v4
+        with:
+          name: soh.otr
+          path: soh.otr
+          retention-days: 3
 
-      - name: Build
+  build-linux:
+    needs: generate-soh-otr
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Git Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y $(cat .github/workflows/apt-deps.txt) libzip-dev zipcmp zipmerge ziptool
+
+      - name: Install latest SDL
+        run: |
+          wget https://github.com/libsdl-org/SDL/releases/download/release-2.30.3/SDL2-2.30.3.tar.gz
+          tar -xzf SDL2-2.30.3.tar.gz
+          cd SDL2-2.30.3
+          ./configure --enable-hidapi-libusb
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
+
+      - name: Install latest SDL_net
+        run: |
+          wget https://www.libsdl.org/projects/SDL_net/release/SDL2_net-2.2.0.tar.gz
+          tar -xzf SDL2_net-2.2.0.tar.gz
+          cd SDL2_net-2.2.0
+          ./configure
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
+
+      - name: Install latest tinyxml2
+        run: |
+          sudo apt-get remove -y libtinyxml2-dev || true
+          wget https://github.com/leethomason/tinyxml2/archive/refs/tags/10.0.0.tar.gz
+          tar -xzf 10.0.0.tar.gz
+          cd tinyxml2-10.0.0
+          mkdir -p build && cd build
+          cmake ..
+          sudo make install -j$(nproc)
+          sudo ldconfig
+
+      - name: Install libzip without crypto
+        run: |
+          wget https://github.com/nih-at/libzip/releases/download/v1.10.1/libzip-1.10.1.tar.gz
+          tar -xzf libzip-1.10.1.tar.gz
+          cd libzip-1.10.1
+          mkdir -p build && cd build
+          cmake .. -DENABLE_COMMONCRYPTO=OFF -DENABLE_GNUTLS=OFF -DENABLE_MBEDTLS=OFF -DENABLE_OPENSSL=OFF
+          sudo make install -j$(nproc)
+          sudo ldconfig
+
+      - name: Patch libultraship GL backend to GL 2.1
+        run: |
+          cd libultraship/src/fast/backends
+          FILE=gfx_opengl.cpp
+          sed -i 's/#version 130/#version 120/' "$FILE"
+          grep -n "textureSize" "$FILE" || echo "aviso: nenhuma ocorrência de textureSize encontrada, confira manualmente"
+
+      - name: Patch shader GLSL
+        run: |
+          SHADER=libultraship/src/fast/shaders/opengl/default.shader.glsl
+          sed -i 's/#version 130/#version 120/' "$SHADER" || true
+          grep -n "textureSize" "$SHADER" || echo "aviso: nenhuma ocorrência de textureSize encontrada, confira manualmente"
+
+      - name: Guard glBlitFramebuffer / glRenderbufferStorageMultisample / GL_DEPTH_STENCIL readback
+        run: |
+          FILE=libultraship/src/fast/backends/gfx_opengl.cpp
+          grep -n "glBlitFramebuffer\|glRenderbufferStorageMultisample\|GL_DEPTH_STENCIL" "$FILE" || true
+          echo "revise manualmente os pontos acima se o build falhar por símbolo ausente em GL2.1"
+
+      - name: Download soh.otr
+        uses: actions/download-artifact@v4
+        with:
+          name: soh.otr
+          path: build-cmake/soh
+
+      - name: Build SoH
+        run: |
+          cmake --no-warn-unused-cli -H. -Bbuild-cmake -GNinja -DCMAKE_BUILD_TYPE:STRING=Release
           cmake --build build-cmake --config Release -j$(nproc)
-
-      - name: Package AppImage
-        run: |
           cd build-cmake
-          cpack -G External || echo "cpack External (AppImage) falhou, veja logs"
+          cpack -G External
+          cd ..
+          mv _packages/*.AppImage soh.appimage || true
 
-      - name: Upload artifacts
+      - name: Upload build
         uses: actions/upload-artifact@v4
         with:
           name: shipwright-gl21-linux-x64
           path: |
+            soh.appimage
             build-cmake/soh/soh.elf
-            build-cmake/*.AppImage
-            build-cmake/**/*.AppImage
